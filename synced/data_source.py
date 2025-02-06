@@ -2,35 +2,40 @@ import os
 import csv
 import json
 import requests
+from itertools import islice
 from abc import ABC, abstractmethod
 
 
 class DataSource(ABC):
     @abstractmethod
-    def fetch_data(self, params=None):
+    def fetch_data(self, start_pos, end_pos):
         """Fetch data method to be implemented by subclasses."""
-        pass
+        raise NotImplementedError("Subclasses must implement this method")
 
 
 class CsvDataSource(DataSource):
     def __init__(self, file_path):
         self.file_path = file_path
 
-    def fetch_data(self, params=None):
+    def fetch_data(self, start_pos, end_pos):
         """
-        Fetch data from a CSV file.
-        :return: List of rows as dictionaries.
+        Read range of lines from the CSV file.
+        :param line_range: A range object or list specifying the lines to read (e.g., range(0, 5))
+        :return: List of rows as dictionaries
         """
-        data = []
+        data = {}
         try:
             with open(self.file_path, mode="r") as f:
                 reader = csv.DictReader(f)
-                data = [row for row in reader]
-            print(f"Read {len(data)} rows from the CSV file.")
+                for i, row in enumerate(
+                    islice(reader, start_pos, end_pos), start=start_pos
+                ):
+                    data[i] = row
+                print(f"Read {len(data)} rows from the CSV file.")
         except FileNotFoundError:
             print(f"Error: CSV file '{self.file_path}' not found.")
         except Exception as e:
-            print(f"Error reading CSV file: {e}")
+            print(f"Error: reading CSV file: {e}")
         return data
 
 
@@ -41,7 +46,7 @@ class APIDataSource(DataSource):
         self.api_url = api_url
         self.api_key = api_key
 
-    def fetch_data(self, params=None):
+    def fetch_data(self, start_pos, end_pos):
         """
         Fetch data from API.
         :return: List of rows as dictionaries.

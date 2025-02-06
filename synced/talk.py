@@ -11,10 +11,12 @@ import flask_server
 import print_client
 import atexit
 import time
+import data_source
 
 DIR_PREFIX = "/home/rupel/Documents/babbling_honeymelons/"
+DIR_PREFIX = "./"
 CSV_FILE = os.path.join(DIR_PREFIX, "short_data.csv")
-STATE_FILE = os.path.join(DIR_PREFIX, "state.json")
+STATE_FILE = os.path.join(DIR_PREFIX, "../state.json")
 
 
 def save_state(position):
@@ -34,39 +36,6 @@ def load_state():
     return 0
 
 
-# Function to process the CSV in chunks
-def process_csv_in_chunks(file_path, start_pos, chunk_size):
-    with open(file_path, mode="r") as f:
-        csv_reader = csv.reader(f)
-        if args.v:
-            print(f"Process csv path {file_path}:{start_pos}, chunk size {chunk_size}")
-        # Get the header
-        if start_pos <= 0:
-            header = next(csv_reader)
-            print(
-                f"{header[0]:<20} {header[1]:<10} {header[2]:<10} {header[3]:<15} {header[4]}"
-            )
-            print("=" * 60)
-        else:
-            # Start enumeration at start_pos
-            if args.v:
-                print(f"Skipping csv reader to position {start_pos}")
-            csv_reader = islice(csv_reader, start_pos, None)
-
-        # Process file in chunks
-        chunk = []
-        for i, row in enumerate(csv_reader, start=start_pos):
-            chunk.append(row)
-            if i % chunk_size == 0:  # Trigger every 'chunk_size' rows
-                yield chunk
-                chunk = []
-                save_state(i)
-        if chunk:  # Yield the remaining rows
-            yield chunk
-            # Reset
-            save_state(0)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Thermoprint csv with dry-run option")
     parser.add_argument(
@@ -83,7 +52,7 @@ def parse_args():
         "--lines",
         type=int,
         default=2,
-        help="Number of lines to print per batch (default: 2)",
+        help="Number of lines to print per batch (default: 4)",
     )
     parser.add_argument(
         "--detection-pause",
@@ -94,30 +63,29 @@ def parse_args():
     return parser.parse_args()
 
 
-def format_row(row):
-    return f"{row[4].strip()[:120]}\n{row[8].strip().split(' ')[0]} {row[3].strip()}"
-
-
-def trigger_print(local_printer, print_client):
+def trigger_print(data_source, local_printer, print_client):
     print("Motion sensor callback!!!")
     start_pos = load_state()
+    start_pos = 1  # TODO: Remove
+    lines = data_source.fetch_data(start_pos, start_pos + args.lines)
 
-    # TODO: For some reason prints the whole file here in a single callback.
-    for chunk in process_csv_in_chunks(CSV_FILE, start_pos, chunk_size=args.lines):
-        if args.v:
-            print(f"\nPrint chunk of {CSV_FILE}:{start_pos} with size {args.lines}")
-        for row in chunk:
-            row = format_row(row)
-            if args.v:
-                print(f">>>\n{row}\n<<<")
+    for i, row in lines.items():
+        formatted = (
+            f"{row['title']}\n{row['author']}\n{row['published_at'].split(' ')[0]}"
+        )
+        print(
+            f"\n>>> Sending {formatted} to {'Local' if i % 2 == 0 else 'Remote'}\n<<<"
+        )
+        if i % 2 == 0:
+            # Even index → Local Printer
             if not args.dry_run:
-                local_printer.thermo_print(row)
-            # Trigger second pi to print. Requires chunk > 2 lines.
-            next_row = format_row(next(iter(chunk)))
-            if args.v:
-                print(f">>>\n{row}\n<<<")
+                local_printer.thermo_print(formatted)
+        else:
+            # Odd index → Remote Printer
             if not args.dry_run:
-                print_client.send_print_request(next_row)
+                print_client.send_print_request(formatted)
+
+        time.sleep(args.delay)
 
 
 # Main function to trigger processing
@@ -125,24 +93,37 @@ def main():
     global args
     args = parse_args()
 
-    thermo = thermo_printer.ThermoPrinter()
-    remote_printer = print_client.PrintClient()  # TODO: Re-init on fail?
+    try:
+        # Printers
+        thermo = thermo_printer.ThermoPrinter()
+        remote_printer = print_client.PrintClient()  # TODO: Re-init on fail?
+        # Data Source
+        csv = data_source.CsvDataSource(CSV_FILE)
+        # Motion Detectors
+        motion_detectors = motion_detector.MotionDetector(
+            debounce_time=args.detection_pause,
+            callback=lambda: trigger_print(csv, thermo, remote_printer),
+        )
+        if args.v:
+            print("Printers initialized: ", thermo, remote_printer)
+            print("Motion detectors initialized: ", motion_detectors)
+        # Print Server
+        server = flask_server.FlaskServer(thermo)
+        atexit.register(server.stop)
+        server.start()
+        print("Flask print server running...")
 
-    motion_detectors = motion_detector.MotionDetector(
-        debounce_time=args.detection_pause,
-        callback=lambda: trigger_print(thermo, remote_printer),
-    )
+        time.sleep(7)
+        motion_detectors.on_motion_detected("debugging")
 
-    if args.v:
-        print("Printers initialized: ", thermo, remote_printer)
-        print("Motion detectors initialized: ", motion_detectors)
-    server = flask_server.FlaskServer(thermo)
-    atexit.register(server.stop)
-    server.start()
-    print("Flask print server running...")
-
-    time.sleep(7)
-    motion_detectors.on_motion_detected("debugging")
+    except (RuntimeError, ValueError) as e:
+        if args.dry_run:
+            print(
+                "⚠️ Dry-run: ThermoPrinter not initializing. Simulating motion detection..."
+            )
+            trigger_print(data_source.CsvDataSource(CSV_FILE), None, None)
+        else:
+            print(f"⚠️ Warning: Failed to initialize ThermoPrinter: {e}")
 
 
 if __name__ == "__main__":
